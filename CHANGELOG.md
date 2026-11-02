@@ -2,6 +2,8 @@
 
 ## Unreleased — 0.2.0
 
+- Update pinned CI tools to export the v2 entrypoint when linking WASM; add regression
+  checks for the link configuration of all three WASM variants in debug and release.
 - License the project under MIT and declare it in all Rust workspace packages.
 - Add `units_catalog()` and `unit_search(query)` table functions over the pinned UCUM atom
   registry. Unsupported units stay visible with status/reason and NULL conversion definitions.
