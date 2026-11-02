@@ -1,0 +1,23 @@
+# name: test/sql/rusty_quack.test
+# description: Fill all four output vectors from the table callback
+# group: [quack]
+
+require rusty_quack
+
+query TTTI
+SELECT * FROM rusty_quack(['Alice', NULL, 'Bob', 'Cara']) ORDER BY total_index NULLS LAST;
+----
+Cara	🐤	Cara|	0
+Bob	🦀	Cara|Bob|	1
+Alice	🐥	Cara|Bob|Alice|	3
+NULL	NULL	NULL	NULL
+
+query I
+SELECT count(*) FROM rusty_quack([]::VARCHAR[]);
+----
+0
+
+query I
+SELECT count(*) FROM rusty_quack(NULL::VARCHAR[]);
+----
+0
