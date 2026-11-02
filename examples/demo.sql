@@ -68,6 +68,17 @@ SELECT u AS source_unit, result.status, result.definition.dimension,
 FROM parsed;
 
 .print ''
+.print '9. Parse measurement text without guessing units or number formats'
+WITH inputs(raw) AS (
+    VALUES ('12.5 kg/m3'), ('-1.25E+3 J'), ('20 Cel'),
+           ('1 eV'), ('1eV'), ('1,234 m'), (NULL)
+), parsed AS (
+    SELECT raw, quantity_parse_checked(raw) AS p FROM inputs
+)
+SELECT raw, p.status, p.quantity.value, p.quantity.unit
+FROM parsed;
+
+.print ''
 .print 'Backend and policy provenance'
 SELECT units_backend();
 

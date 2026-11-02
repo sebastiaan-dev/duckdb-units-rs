@@ -3,6 +3,7 @@
 
 mod cache;
 mod catalog;
+mod quantity;
 
 use cache::Cache;
 use duckdb_neo::{
@@ -294,6 +295,7 @@ impl ScalarCallbacks for Compatible {
 
 pub fn register(extension: &Extension) -> Result<()> {
     catalog::register(extension)?;
+    quantity::register(extension)?;
     for (name, delta, checked, description, example) in [
         (
             "unit_convert",

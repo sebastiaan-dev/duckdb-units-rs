@@ -1,0 +1,310 @@
+# name: test/sql/quantity.test
+# description: Parse measurement text without unit, exponent, locale or NULL ambiguity
+# group: [units]
+
+require units
+
+query RTTI
+SELECT q.value, q.unit, q.definition.dimension, q.definition.factor
+FROM (SELECT quantity_parse('12.5 kg/m3') AS q);
+----
+12.5	kg/m3	L-3.M	1000
+
+query RTI
+SELECT q.value, q.unit, unit_convert(q.value,q.unit,'J')=-1250
+FROM (SELECT quantity_parse(E'  -1.25E+3\tJ  ') AS q);
+----
+-1250.0	J	true
+
+query IIII
+SELECT (quantity_parse('+.5 m')).value=0.5,
+       (quantity_parse('2. m')).value=2,
+       (quantity_parse('25 %')).value=25,
+       (quantity_parse('3 1')).definition.dimension='1';
+----
+true	true	true	true
+
+# Unit spelling is preserved. An electronvolt is not parsed as a decimal exponent.
+query RTI
+SELECT q.value, q.unit, q.definition=unit_parse('eV')
+FROM (SELECT quantity_parse('1 eV') AS q);
+----
+1.0	eV	true
+
+query RT
+SELECT q.value, q.unit FROM (SELECT quantity_parse('5 mg{total}') AS q);
+----
+5.0	mg{total}
+
+query I
+SELECT unit_convert(q.value,q.unit,'m')=2000
+FROM (SELECT quantity_parse('2 10*3.m') AS q);
+----
+true
+
+# Parsing does not choose absolute/delta semantics on behalf of the caller.
+query III
+SELECT q.definition.is_affine,
+       unit_convert(q.value,q.unit,'[degF]')=68,
+       unit_convert_delta(q.value,q.unit,'[degF]')=36
+FROM (SELECT quantity_parse('20 Cel') AS q);
+----
+true	true	true
+
+query I
+SELECT (quantity_parse('1 MW' COLLATE nocase)).definition.factor /
+       (quantity_parse('1 mW' COLLATE nocase)).definition.factor=1e9;
+----
+true
+
+query T
+SELECT quantity_parse(NULL);
+----
+NULL
+
+query TII
+SELECT p.status, p.quantity IS NULL, p IS NOT NULL
+FROM (SELECT quantity_parse_checked(NULL) AS p);
+----
+missing_input	true	true
+
+statement error
+SELECT quantity_parse('12.5kg');
+----
+invalid_quantity
+
+statement error
+SELECT quantity_parse('1eV');
+----
+invalid_quantity
+
+statement error
+SELECT quantity_parse('12.5');
+----
+invalid_quantity
+
+statement error
+SELECT quantity_parse('1,234 m');
+----
+invalid_quantity
+
+statement error
+SELECT quantity_parse('1e m');
+----
+invalid_quantity
+
+statement error
+SELECT quantity_parse('1e999 m');
+----
+overflow
+
+statement error
+SELECT quantity_parse('1e-999 m');
+----
+overflow
+
+statement error
+SELECT quantity_parse('NaN m');
+----
+non_finite_input
+
+statement error
+SELECT quantity_parse('5 watts');
+----
+unknown_unit
+
+statement error
+SELECT quantity_parse('20 Cel/s');
+----
+unsupported_unit
+
+# Do not implicitly trim unit_parse input; only quantity envelope whitespace is accepted.
+query III
+SELECT unit_valid(' m '),
+       (quantity_parse(E' \t1\t m\t ')).unit='m',
+       (quantity_parse_checked(E'1 m\n')).status='invalid_quantity';
+----
+false	true	true
+
+query ITII
+SELECT id, p.status, p.quantity IS NULL, p.message IS NOT NULL
+FROM (SELECT id, quantity_parse_checked(t) AS p FROM (VALUES
+    (1,'1 m'), (2,'1 unknown'), (3,'1 Cel/s'), (4,'1 m//s'),
+    (5,'1e m'), (6,NULL), (7,'-Infinity m'), (8,'1e-999 m'),
+    (9,'1,5 m'), (10,'1 kWh'), (11,'1 C')
+) t(id,t)) ORDER BY id;
+----
+1	ok	false	false
+2	unknown_unit	true	true
+3	unsupported_unit	true	true
+4	invalid_syntax	true	true
+5	invalid_quantity	true	true
+6	missing_input	true	true
+7	non_finite_input	true	true
+8	overflow	true	true
+9	invalid_quantity	true	true
+10	unknown_unit	true	true
+11	ok	false	false
+
+# Input and output metadata are not silently changed to a canonical unit.
+query TTII
+SELECT p.quantity.unit, p.status, p.quantity.value=12.5,
+       p.quantity.definition=unit_parse('kg/m3')
+FROM (SELECT quantity_parse_checked('12.5 kg/m3') AS p);
+----
+kg/m3	ok	true	true
+
+query III
+SELECT (quantity_parse('0e-999 m')).value=0,
+       signbit((quantity_parse('-0 K')).value),
+       (quantity_parse('5e-324 m')).value>0;
+----
+true	true	true
+
+query TT
+SELECT (quantity_parse_checked(repeat(' ',8193))).status,
+       (quantity_parse_checked('1 '||repeat('m',4097))).status;
+----
+resource_limit	resource_limit
+
+# Decimal rounding immediately around DOUBLE's finite/subnormal boundaries.
+query TTTT
+SELECT (quantity_parse_checked('1.7976931348623157e308 m')).status,
+       (quantity_parse_checked('1.7976931348623159e308 m')).status,
+       (quantity_parse_checked('2.4703282292062327e-324 m')).status,
+       (quantity_parse_checked('2.4703282292062328e-324 m')).status;
+----
+ok	overflow	overflow	ok
+
+query TTI
+SELECT (quantity_parse_checked('1'||repeat(' ',8190)||'m')).status,
+       (quantity_parse_checked('1 m{'||repeat('a',4093)||'}')).status,
+       length((quantity_parse('1 m{'||repeat('a',4093)||'}')).unit);
+----
+ok	ok	4096
+
+# Unit errors keep their original status AND detailed explanation.
+query I
+SELECT count(*) FROM (
+    SELECT unit_parse_checked(u) AS a, quantity_parse_checked('2 '||u) AS b
+    FROM (VALUES ('madeup'), ('Cel/s'), ('m//s'), ('dB'), ('kg/m^3')) t(u)
+) WHERE a.status IS DISTINCT FROM b.status OR a.message IS DISTINCT FROM b.message;
+----
+0
+
+# Checked parsing composes with normalization while preserving the first failure.
+query ITR
+SELECT id, p.status, CASE WHEN p.status='ok'
+    THEN round(unit_convert(p.quantity.value,p.quantity.unit,'kW.h'),6) END AS kwh
+FROM (SELECT id, quantity_parse_checked(t) AS p FROM (VALUES
+    (1,'3600000 J'), (2,'1250 W.h'), (3,'2.5 kW.h'), (4,'1e J'), (5,NULL)
+) t(id,t)) ORDER BY id;
+----
+1	ok	1.0
+2	ok	1.25
+3	ok	2.5
+4	invalid_quantity	NULL
+5	missing_input	NULL
+
+# A parsed unit can still be incompatible with the normalization target.
+query ITR
+WITH inputs(id,raw) AS (
+    VALUES (1,'3600000 J'), (2,'1250 W.h'), (3,'2 kg'), (4,'1e J'), (5,NULL)
+), parsed AS (
+    SELECT id,quantity_parse_checked(raw) AS p FROM inputs
+), converted AS (
+    SELECT *,CASE WHEN p.status='ok'
+        THEN unit_convert_checked(p.quantity.value,p.quantity.unit,'kW.h') END AS c
+    FROM parsed
+)
+SELECT id,CASE WHEN p.status='ok' THEN c.status ELSE p.status END,round(c.value,6)
+FROM converted ORDER BY id;
+----
+1	ok	1.0
+2	ok	1.25
+3	incompatible_dimension	NULL
+4	invalid_quantity	NULL
+5	missing_input	NULL
+
+# Many distinct measurements reuse unit definitions, rather than caching entire inputs.
+statement ok
+CREATE TABLE quantities AS
+SELECT i, CASE i%5 WHEN 0 THEN i||' J' WHEN 1 THEN i||' W.h'
+                  WHEN 2 THEN '1e J' WHEN 3 THEN NULL ELSE '2 Cel/s' END AS t
+FROM range(10000) t(i);
+
+query TIII
+SELECT p.status, count(*), count(p.quantity), count(p.message)
+FROM (SELECT quantity_parse_checked(t) AS p FROM quantities)
+GROUP BY p.status ORDER BY p.status;
+----
+invalid_quantity	2000	0	2000
+missing_input	2000	0	2000
+ok	4000	4000	0
+unsupported_unit	2000	0	2000
+
+query III
+SELECT count(*), count(p.quantity), count(*) FILTER (WHERE p.status='ok' AND p.quantity.value<>i)
+FROM (SELECT i,quantity_parse_checked(t) AS p FROM quantities WHERE i%3<>0);
+----
+6666	2666	0
+
+query I
+SELECT count(*) FROM (
+    SELECT quantity_parse_checked(CASE WHEN i<10000 THEN NULL WHEN i<20000 THEN 'bad'
+                                      ELSE '1 m' END) AS p
+    FROM range(30000) t(i)
+) WHERE p.status<>'ok' AND (
+    p.quantity.value IS NOT NULL OR p.quantity.unit IS NOT NULL
+    OR p.quantity.definition.dimension IS NOT NULL OR p.quantity.definition.base_unit IS NOT NULL
+    OR p.quantity.definition.factor IS NOT NULL OR p.quantity.definition.offset IS NOT NULL
+    OR p.quantity.definition.is_affine IS NOT NULL
+);
+----
+0
+
+query III
+SELECT count(*), count(p.quantity), count(*) FILTER (WHERE p.quantity.definition.factor=1)
+FROM (SELECT quantity_parse_checked(i||' m{sample_'||i||'}') AS p FROM range(3000) t(i));
+----
+3000	3000	3000
+
+# Strict NULL propagation must clear every nested field across chunks too.
+query III
+SELECT count(*), count(q), count(*) FILTER (WHERE q IS NULL AND (
+    q.value IS NOT NULL OR q.unit IS NOT NULL OR q.definition.dimension IS NOT NULL
+    OR q.definition.base_unit IS NOT NULL OR q.definition.factor IS NOT NULL
+    OR q.definition.offset IS NOT NULL OR q.definition.is_affine IS NOT NULL))
+FROM (SELECT quantity_parse(CASE WHEN i<10000 OR i>=20000 THEN NULL ELSE i||' J' END) AS q
+      FROM range(30000) t(i));
+----
+30000	10000	0
+
+query III
+SELECT count(q), count(*) FILTER (WHERE q IS NULL AND q.definition IS NOT NULL),
+       count(*) FILTER (WHERE q IS NOT NULL AND q.value<>i)
+FROM (SELECT i,quantity_parse(CASE WHEN i%3=0 THEN NULL ELSE i||' J' END) AS q
+      FROM range(10000) t(i));
+----
+6666	0	0
+
+statement ok
+PREPARE parse_quantity AS SELECT (quantity_parse_checked($1)).status;
+
+query T
+EXECUTE parse_quantity('20 Cel');
+----
+ok
+
+query T
+EXECUTE parse_quantity('1e Cel');
+----
+invalid_quantity
+
+query T
+EXECUTE parse_quantity(NULL);
+----
+missing_input
+
+statement ok
+DROP TABLE quantities;

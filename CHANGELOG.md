@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased — 0.2.0
+## Unreleased — 0.3.0
+
+- Add strict `quantity_parse(text)` and diagnostic `quantity_parse_checked(text)` for a
+  decimal measurement followed by an explicit space/tab and a supported UCUM expression.
+- Preserve original unit spelling and return the parsed definition without silently converting
+  the measurement, inferring a unit, or choosing absolute versus delta semantics.
+- Reject ambiguous compact forms, locale-dependent numbers, non-finite values, and numeric
+  overflow/underflow to zero; enforce bounded input lengths.
+- Extend the demo and SQL tests with text normalization, precise numerical/resource boundaries,
+  unchanged unit-error diagnostics, and nested NULL handling across chunks.
+
+## Development milestone — 0.2.0
 
 - Update pinned CI tools to export the v2 entrypoint when linking WASM; add regression
   checks for the link configuration of all three WASM variants in debug and release.

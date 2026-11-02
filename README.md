@@ -3,7 +3,7 @@
 A native DuckDB **2.0.0 / C Extension API v2** extension for unit conversion,
 compound-unit parsing, dimensional compatibility, unit discovery, and auditable measurement normalization.
 
-**Status: 0.2.0 development demo, not a production release.** No worker process or custom
+**Status: 0.3.0 development demo, not a production release.** No worker process or custom
 numeric type. Not yet published to the DuckDB community registry.
 
 Built from [duckdb/extension-template-rs](https://github.com/duckdb/extension-template-rs),
@@ -94,9 +94,9 @@ SELECT unit_convert_checked(NULL, 'J', 'kW.h');
 | International inch | `[in_i]` | `inch` |
 | Dimensionless | `1` | empty string |
 
-**`C` means coulomb, not Celsius; `F` means farad, not Fahrenheit.** There is no
-case folding, whitespace trimming, or heuristic alias guessing. `MW` and `mW` differ
-by a factor of one billion. Use parentheses to make denominators explicit.
+In unit-string APIs there is no case folding, whitespace trimming, or heuristic alias
+guessing. **`C` means coulomb, not Celsius; `F` means farad, not Fahrenheit.** `MW` and
+`mW` differ by a factor of one billion. Use parentheses to make denominators explicit.
 
 UCUM annotations are accepted but do not enforce quantity kinds: `mg{total}` and `mg`
 are dimensionally equivalent. Annotations must not be used as a substitute for validation.
@@ -152,6 +152,62 @@ SELECT result.status, count(*) AS rows
 FROM audited GROUP BY result.status ORDER BY result.status;
 ```
 
+## Parse measurements stored as text
+
+```sql
+SELECT quantity_parse('12.5 kg/m3');
+-- {value: 12.5, unit: 'kg/m3', definition: {dimension: 'L-3.M', ...}}
+
+SELECT quantity_parse_checked('-1.25E+3 J');
+-- {quantity: {value: -1250, unit: 'J', definition: {...}}, status: 'ok', message: NULL}
+
+SELECT quantity_parse_checked('1eV');
+-- {quantity: NULL, status: 'invalid_quantity', message: ...}
+SELECT quantity_parse('1 eV'); -- one electronvolt, unambiguously
+```
+
+Quantity text has a deliberately explicit grammar:
+
+- A decimal number, **at least one ASCII space or tab**, and a supported UCUM unit.
+- An optional leading `+` or `-`, a decimal point, and an `e`/`E` exponent are accepted:
+  `+.5 m`, `2. m`, and `-1.25E+3 J` are valid. Group separators, decimal commas,
+  hexadecimal numbers and locale guessing are not supported.
+- Surrounding ASCII spaces/tabs are ignored for the quantity envelope. Newlines and
+  Unicode whitespace separators are rejected. Unit syntax itself remains strict.
+- Compact forms such as `12.5kg` and `1eV` are rejected rather than guessed. A unit is
+  mandatory; use `3 1` for a dimensionless measurement, not just `3`.
+- Values must fit in a finite DOUBLE. NaN/Infinity report `non_finite_input`; out-of-range
+  decimal values and nonzero values rounded to zero report `overflow`. Representable
+  subnormals and genuine signed zero are accepted.
+- Total quantity text is limited to 8192 bytes; the unit expression still has a 4096-byte
+  limit. Numeric-envelope validation precedes unit resolution.
+
+The result preserves the value and unit spelling after trimming envelope whitespace; it
+**does not convert to base units**. `definition` is the same struct returned by `unit_parse`.
+Parsing `20 Cel` does not decide whether the value is an absolute temperature or a difference;
+choose `unit_convert` or `unit_convert_delta` explicitly when converting it.
+
+The checked form returns `STRUCT(quantity, status, message)`. On any error, the entire
+`quantity` and its nested fields are NULL. Unit-parser errors retain their original status
+and message. NULL input is `missing_input`; a malformed numeric envelope is `invalid_quantity`.
+
+For dirty text, retain parsing errors and use checked conversion for the next stage too:
+
+```sql
+WITH inputs(raw) AS (
+    VALUES ('3600000 J'), ('1250 W.h'), ('2 kg'), ('1e J'), (NULL)
+), parsed AS (
+    SELECT raw, quantity_parse_checked(raw) AS p FROM inputs
+), converted AS (
+    SELECT *, CASE WHEN p.status='ok'
+        THEN unit_convert_checked(p.quantity.value, p.quantity.unit, 'kW.h') END AS c
+    FROM parsed
+)
+SELECT raw, CASE WHEN p.status='ok' THEN c.status ELSE p.status END AS status,
+       round(c.value, 6) AS kwh
+FROM converted;
+```
+
 ## SQL API
 
 All measurement arguments/results are `DOUBLE`; unit arguments are `VARCHAR`.
@@ -165,6 +221,8 @@ All measurement arguments/results are `DOUBLE`; unit arguments are `VARCHAR`.
 | `unit_compatible(source_unit, target_unit)` | Boolean dimensional compatibility; unknown/unsupported units raise errors |
 | `unit_parse(unit)` | `STRUCT(dimension VARCHAR, base_unit VARCHAR, factor DOUBLE, offset DOUBLE, is_affine BOOLEAN)` |
 | `unit_parse_checked(unit)` | `STRUCT(definition <unit_parse result>, status VARCHAR, message VARCHAR)`; failed/missing input has NULL definition |
+| `quantity_parse(text)` | `STRUCT(value DOUBLE, unit VARCHAR, definition <unit_parse result>)` |
+| `quantity_parse_checked(text)` | `STRUCT(quantity <quantity_parse result>, status VARCHAR, message VARCHAR)` |
 | `unit_dimension(unit)` | UCUM dimension vector as text |
 | `unit_valid(unit)` | Whether the unit is supported by **this extension**, not a full UCUM syntax validator |
 | `units_backend()` | Backend, UCUM, and extension-policy versions |
@@ -199,11 +257,11 @@ UCUM treats plane angle as a separate dimension, so `Hz` and `rad/s` are not com
 Strict scalar functions propagate any NULL input to NULL. `unit_valid(NULL)` is also NULL.
 Checked functions always return a struct: missing inputs produce `missing_input`, even
 if another argument is invalid. A successful struct has `status = 'ok'` and NULL message.
-Failed conversions have NULL `value`; failed parsing has NULL `definition`, including its
-nested fields. Both have a stable status code and explanatory text. Discovery table NULL
-behavior is described above.
+Failed conversions have NULL `value`; failed unit parsing has NULL `definition`; failed
+quantity parsing has NULL `quantity`. Nested fields are NULL as well. All checked functions
+have a stable status code and explanatory text. Discovery table NULL behavior is described above.
 
-Statuses include `missing_input`, `invalid_syntax`, `unknown_unit`,
+Statuses include `missing_input`, `invalid_quantity`, `invalid_syntax`, `unknown_unit`,
 `incompatible_dimension`, `unsupported_unit`, `invalid_delta_unit`,
 `non_finite_input`, `overflow`, and `resource_limit`. Match status codes, not message text.
 The `overflow` status also covers numerical underflow to zero.
@@ -214,7 +272,8 @@ The `overflow` status also covers numerical underflow to zero.
 - Native vector callbacks handle runtime unit columns and NULL/filtered inputs.
 - Each query worker has bounded caches: up to 256 parsed units and 256 conversion pairs,
   including error results. Caches clear when full; user inputs/results are not retained globally.
-  Repeated units are parsed on first execution, **not yet at bind time**.
+  Repeated units are parsed on first execution, **not yet at bind time**. Quantity parsing
+  caches the unit definition, not the entire measurement text.
 - Discovery tables share an immutable cache of the library's atom definitions and support
   decisions. Table scans have independent cursors, exact cardinality, and projection pushdown.
   Filters remain evaluated by DuckDB; search does not mutate the registry or parser.
@@ -245,6 +304,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 make release
 make test_release
+python3 scripts/test_build_config.py
 configure/venv/bin/python3 scripts/test_build_metadata.py
 ```
 
@@ -265,6 +325,10 @@ Layout:
   temperature semantics, diagnostics, high-cardinality inputs, and numerical regressions.
 - `test/sql/discovery.test`: registry/parser consistency, discovery queries, table projections,
   repeated/prepared scans, and checked nested-struct validity across chunks.
+- `test/sql/quantity.test`: quantity envelopes, exponent/locale ambiguity, numerical boundaries,
+  exact resource limits, and strict/checked nested NULL behavior.
+- `scripts/test_build_config.py`: WASM v2 link-command regression checks. These dry-run checks
+  complement actual builds in distribution CI; they are not WASM runtime tests.
 
 See [the roadmap](docs/ROADMAP.md) for the remaining release gates and planned scope.
 

@@ -10,6 +10,8 @@ or broad convenience features.
 - Multiplicative compound conversions, dimensional checks, and explicit absolute/delta temperatures.
 - Strict and checked conversion, numerical boundary handling, and bounded worker-local caches.
 - Strict and checked unit parsing, with auditable NULL/error semantics.
+- Strict and checked quantity-text parsing: explicit decimal grammar and separator,
+  preserved UCUM spelling, numeric/resource bounds, and no alias or locale guessing.
 - UCUM atom catalog and substring search, including unsupported-unit diagnostics.
 - SQLLogicTests for columnar inputs, resource/numeric limits, registry consistency, table scans,
   prepared queries, and nested-struct validity.
@@ -32,18 +34,15 @@ or broad convenience features.
 
 ## Next functional improvements
 
-1. **Quantity text parsing.** Parse a number plus a strict UCUM expression, with separate
-   checked/strict interfaces. Specify whitespace, exponent, non-finite and locale behavior first;
-   do not conflate this with alias guessing.
-2. **Explicit normalization.** Optional user-controlled aliases (`kWh` → `kW.h`, for example),
+1. **Explicit normalization.** Optional user-controlled aliases (`kWh` → `kW.h`, for example),
    returning original input, resolved code, and the applied rule. Strict parsing stays the default;
    `C` must not silently switch from coulomb to Celsius.
-3. **Conversion explanations.** Expose the selected conversion mode and scale/offset, with
+2. **Conversion explanations.** Expose the selected conversion mode and scale/offset, with
    correct treatment of wide numeric coefficients. Never advertise a finite DOUBLE coefficient
    when only the final scaled measurement is representable.
-4. **Dataset validation recipes.** Add useful SQL examples for status summaries, quarantine
+3. **Dataset validation recipes.** Add useful SQL examples for status summaries, quarantine
    tables, and expected-dimension contracts. Prefer composable SQL over a function for every report.
-5. **Optional quantity kinds.** Explicit metadata can distinguish energy/torque and similar
+4. **Optional quantity kinds.** Explicit metadata can distinguish energy/torque and similar
    dimensionally identical quantities. Neither annotations nor the catalog's descriptive property
    labels currently enforce such contracts.
 

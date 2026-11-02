@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod catalog;
+pub mod quantity;
 
 use octofhir_ucum::{Dimension, ErrorKind, Number, SpecialKind};
 use std::fmt;
