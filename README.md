@@ -272,8 +272,9 @@ The `overflow` status also covers numerical underflow to zero.
 - Native vector callbacks handle runtime unit columns and NULL/filtered inputs.
 - Each query worker has bounded caches: up to 256 parsed units and 256 conversion pairs,
   including error results. Caches clear when full; user inputs/results are not retained globally.
-  Repeated units are parsed on first execution, **not yet at bind time**. Quantity parsing
-  caches the unit definition, not the entire measurement text.
+  Dynamic units are parsed on first execution. Constant source/target conversion units are
+  prepared at bind time, with invalid plans deferred until execution to preserve NULL/error
+  semantics. Quantity parsing caches the unit definition, not the entire measurement text.
 - Discovery tables share an immutable cache of the library's atom definitions and support
   decisions. Table scans have independent cursors, exact cardinality, and projection pushdown.
   Filters remain evaluated by DuckDB; search does not mutate the registry or parser.
@@ -295,6 +296,14 @@ The `overflow` status also covers numerical underflow to zero.
 - No custom numeric type, quantity algebra, or alias registry yet.
 - Native macOS arm64 has been exercised locally. The template retains WASM and distribution
   wiring, but local success is not a claim of validation on every platform.
+
+## Performance
+
+The [benchmark report](benchmarks/README.md) covers all function families, including reproducible
+Hyperfine commands, workload definitions, build provenance, and measurement limitations. Targeted
+optimizations reduced constant-unit conversion latency by about 30–33% and unique-unit parsing /
+validation by about 15% on the measured single-thread workload, without weakening validation.
+These are workload-specific results, not universal speedup guarantees.
 
 ## Development
 
@@ -327,6 +336,9 @@ Layout:
   repeated/prepared scans, and checked nested-struct validity across chunks.
 - `test/sql/quantity.test`: quantity envelopes, exponent/locale ambiguity, numerical boundaries,
   exact resource limits, and strict/checked nested NULL behavior.
+- `test/sql/bind.test`: constant-unit specialization, deferred errors, CASE/TRY, prepared
+  parameters, optimizer equality/grouping, and filtered multi-chunk input.
+- `benchmarks/run.py`: output-verified, reproducible Hyperfine comparisons.
 - `scripts/test_build_config.py`: WASM v2 link-command regression checks. These dry-run checks
   complement actual builds in distribution CI; they are not WASM runtime tests.
 

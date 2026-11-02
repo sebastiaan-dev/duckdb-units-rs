@@ -17,6 +17,8 @@ or broad convenience features.
   prepared queries, and nested-struct validity.
 - Refreshed revision/override metadata on every package build, verified by an E2E rebuild/load
   regression test. Rust CI now also executes SQL and metadata tests.
+- Measured performance improvements: constant-unit binding specialization, borrowed cached plans,
+  and reduced parser allocation/identity work; reproducible Hyperfine harness and report.
 
 ## Before publishing a release
 
@@ -48,13 +50,14 @@ or broad convenience features.
 
 ## Performance work requires measurements
 
-- Bind-time specialization for constant source/target units.
+- Specialization for one constant and one column-driven unit, if measurements justify it.
 - Dictionary-aware execution and caching strategies for high-cardinality columns.
 - Hyperfine comparisons for constant, low-cardinality, high-cardinality, invalid and NULL inputs,
   with identical outputs, fixed thread counts, pinned revisions, and recorded build settings.
 
-The implementation already has per-worker parsing and pair caches and an ordinary-conversion
-FMA path; none of the proposed optimizations is a performance claim until measured.
+The implementation has per-worker parsing and pair caches, bind-time preparation of constant
+source/target conversions, and an ordinary-conversion FMA path. See the [benchmark report](../benchmarks/README.md)
+for completed measurements. Further optimizations still require representative comparisons.
 
 ## Deliberately deferred
 

@@ -2,6 +2,11 @@
 
 ## Unreleased — 0.3.0
 
+- Specialize constant-unit conversions at bind time while retaining execution-time errors and
+  NULL semantics; evaluate cached dynamic plans by reference rather than copying coefficients.
+- Reduce parser allocations and exact-identity arithmetic; add reproducible Hyperfine benchmarks
+  and a report of measured improvements and limitations.
+
 - Add strict `quantity_parse(text)` and diagnostic `quantity_parse_checked(text)` for a
   decimal measurement followed by an explicit space/tab and a supported UCUM expression.
 - Preserve original unit spelling and return the parsed definition without silently converting
