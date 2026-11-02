@@ -1,0 +1,213 @@
+# name: test/sql/discovery.test
+# description: UCUM discovery, projection/scans, and checked parsing
+# group: [units]
+
+require units
+
+# This registry is pinned with the backend; compounds and prefixed forms are not enumerated.
+query IIII
+SELECT count(*), count(DISTINCT unit), count(*) FILTER (WHERE supported), count(*) FILTER (WHERE is_base)
+FROM units_catalog();
+----
+312	312	253	7
+
+query TTTIIIII
+SELECT unit, name, property, prefixable, is_base, supported, factor, c.offset
+FROM units_catalog() c WHERE unit='m';
+----
+m	meter	length	true	true	true	1	0
+
+# Reordered projected columns must retain their types and values.
+query ITTII
+SELECT is_affine, unit, base_unit, factor=1, abs(c.offset-273.15)<1e-12
+FROM units_catalog() c WHERE unit='Cel';
+----
+true	Cel	K	true	true
+
+# Unsupported definitions remain visible, but never advertise a linear factor/offset.
+query TIIIIIII
+SELECT status, supported, message IS NOT NULL, dimension IS NULL, base_unit IS NULL,
+       factor IS NULL, c.offset IS NULL, is_affine IS NULL
+FROM units_catalog() c WHERE unit='B';
+----
+unsupported_unit	false	true	true	true	true	true	true
+
+# Catalog support decisions and definitions must agree with the actual public parser.
+query I
+SELECT count(*) FROM (
+    SELECT c.*, unit_parse_checked(unit) AS p FROM units_catalog() c
+) t WHERE supported != unit_valid(unit) OR status != p.status
+    OR dimension IS DISTINCT FROM p.definition.dimension
+    OR base_unit IS DISTINCT FROM p.definition.base_unit
+    OR factor IS DISTINCT FROM p.definition.factor
+    OR t.offset IS DISTINCT FROM p.definition.offset
+    OR is_affine IS DISTINCT FROM p.definition.is_affine
+    OR message IS DISTINCT FROM p.message;
+----
+0
+
+query II
+SELECT unit_valid('kg/m3'), (SELECT count(*) FROM units_catalog() WHERE unit='kg/m3');
+----
+true	0
+
+query TT
+SELECT unit, name FROM unit_search('Celsius');
+----
+Cel	degree Celsius
+
+query II
+SELECT (SELECT count(*) FROM unit_search('pressure')), (SELECT count(*) FROM unit_search('PRESSURE'));
+----
+10	10
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM unit_search('Pressure') EXCEPT SELECT * FROM unit_search('pressure'))
+    UNION ALL
+    (SELECT * FROM unit_search('pressure') EXCEPT SELECT * FROM unit_search('Pressure'))
+);
+----
+0
+
+query II
+SELECT count(*) FILTER (WHERE unit='Pa' AND supported),
+       count(*) FILTER (WHERE unit='B[SPL]' AND NOT supported)
+FROM unit_search('pressure');
+----
+1	1
+
+query III
+SELECT (SELECT count(*) FROM unit_search('')),
+       (SELECT count(*) FROM unit_search(NULL)),
+       (SELECT count(*) FROM unit_search('not-a-physical-unit'));
+----
+312	0	0
+
+# Case-insensitive discovery never turns words into accepted conversion aliases.
+query II
+SELECT count(*), unit_valid('celsius') FROM unit_search('celsius');
+----
+1	false
+
+statement error
+SELECT * FROM unit_search(repeat('x',4097));
+----
+resource_limit
+
+# Fresh global scan state per scan/execution; a prior read must not consume bind data.
+query III
+SELECT (SELECT count(*) FROM units_catalog()),
+       (SELECT count(*) FROM units_catalog()),
+       (SELECT count(*) FROM units_catalog() a JOIN units_catalog() b USING (unit));
+----
+312	312	312
+
+query I
+SELECT count(*) FROM (SELECT unit FROM units_catalog() ORDER BY unit LIMIT 5);
+----
+5
+
+statement ok
+PREPARE search_units AS SELECT count(*) FROM unit_search($1);
+
+query I
+EXECUTE search_units('pressure');
+----
+10
+
+# Same parameters must also restart the scan without relying on rebinding.
+query I
+EXECUTE search_units('pressure');
+----
+10
+
+query I
+EXECUTE search_units('celsius');
+----
+1
+
+query I
+EXECUTE search_units(NULL);
+----
+0
+
+# Checked parsing returns a populated definition only on success.
+query TTIII
+SELECT p.status, p.definition.dimension, p.definition.factor=1000,
+       p.message IS NULL, p IS NOT NULL
+FROM (SELECT unit_parse_checked('kg/m3') AS p);
+----
+ok	L-3.M	true	true	true
+
+query TTII
+SELECT p.status, p.message, p.definition IS NULL, p IS NOT NULL
+FROM (SELECT unit_parse_checked(NULL) AS p);
+----
+missing_input	unit must be present	true	true
+
+query ITII
+SELECT id, p.status, p.definition IS NULL, p.message IS NOT NULL
+FROM (SELECT id, unit_parse_checked(u) AS p FROM (VALUES
+    (1,'m'), (2,'madeup'), (3,'Cel/s'), (4,'m//s'), (5,''), (6,NULL)
+) t(id,u)) ORDER BY id;
+----
+1	ok	false	false
+2	unknown_unit	true	true
+3	unsupported_unit	true	true
+4	invalid_syntax	true	true
+5	invalid_syntax	true	true
+6	missing_input	true	true
+
+query TT
+SELECT (unit_parse_checked(repeat('m',4097))).status,
+       (unit_parse_checked(repeat('(',150)||'m'||repeat(')',150))).status;
+----
+resource_limit	resource_limit
+
+# Nested struct validity must not leak across success/error/NULL rows or chunks.
+statement ok
+CREATE TABLE unit_inputs AS
+SELECT i, CASE i%5 WHEN 0 THEN 'kg/m3' WHEN 1 THEN 'Cel' WHEN 2 THEN 'madeup'
+                  WHEN 3 THEN NULL ELSE 'Cel/s' END AS u
+FROM range(10000) t(i);
+
+query TIII
+SELECT p.status, count(*), count(p.definition), count(p.message)
+FROM (SELECT unit_parse_checked(u) AS p FROM unit_inputs)
+GROUP BY p.status ORDER BY p.status;
+----
+missing_input	2000	0	2000
+ok	4000	4000	0
+unknown_unit	2000	0	2000
+unsupported_unit	2000	0	2000
+
+query III
+SELECT count(*), count(*) FILTER (WHERE p.definition IS NOT NULL),
+       count(*) FILTER (WHERE p.status='ok' AND p.definition.factor NOT IN (1,1000))
+FROM (SELECT unit_parse_checked(u) AS p FROM unit_inputs WHERE i%3<>0);
+----
+6666	2666	0
+
+query III
+SELECT count(*), count(p.definition), count(*) FILTER (WHERE p.definition.factor=1)
+FROM (SELECT unit_parse_checked('m{sample_'||i||'}') AS p FROM range(3000) t(i));
+----
+3000	3000	3000
+
+# Exercise whole NULL/error/success chunks as well as mixed validity.
+query I
+SELECT count(*) FROM (
+    SELECT unit_parse_checked(CASE WHEN i<10000 THEN NULL WHEN i<20000 THEN 'madeup'
+                                  ELSE 'kg/m3' END) AS p
+    FROM range(30000) t(i)
+) WHERE p.status<>'ok' AND (
+    p.definition.dimension IS NOT NULL OR p.definition.base_unit IS NOT NULL
+    OR p.definition.factor IS NOT NULL OR p.definition.offset IS NOT NULL
+    OR p.definition.is_affine IS NOT NULL
+);
+----
+0
+
+statement ok
+DROP TABLE unit_inputs;

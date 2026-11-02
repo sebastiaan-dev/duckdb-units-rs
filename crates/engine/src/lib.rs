@@ -2,10 +2,15 @@
 //! Only multiplicative and affine temperature units are admitted in this release.
 #![forbid(unsafe_code)]
 
+pub mod catalog;
+
 use octofhir_ucum::{Dimension, ErrorKind, Number, SpecialKind};
 use std::fmt;
 
-pub const BACKEND: &str = "octofhir-ucum 0.9.2; UCUM 2.2; units policy 0.1.0";
+pub const BACKEND: &str = concat!(
+    "octofhir-ucum 0.9.2; UCUM 2.2; units policy ",
+    env!("CARGO_PKG_VERSION")
+);
 pub const MAX_UNIT_BYTES: usize = 4096;
 
 #[derive(Clone, Debug)]

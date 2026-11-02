@@ -1,9 +1,9 @@
 # units — physical units for DuckDB, in Rust
 
 A native DuckDB **2.0.0 / C Extension API v2** extension for unit conversion,
-compound-unit parsing, dimensional compatibility, and auditable measurement normalization.
+compound-unit parsing, dimensional compatibility, unit discovery, and auditable measurement normalization.
 
-**Status: working initial demo, not a production release.** No worker process or custom
+**Status: 0.2.0 development demo, not a production release.** No worker process or custom
 numeric type. Not yet published to the DuckDB community registry.
 
 Built from [duckdb/extension-template-rs](https://github.com/duckdb/extension-template-rs),
@@ -19,7 +19,7 @@ Prerequisites: current stable Rust, Python 3 with venv, Make, Git, and a DuckDB 
 No DuckDB source build, C++ compilation, or separately installed unit database is needed.
 
 ```sh
-git clone --recurse-submodules git@github.com:sebastiaan-dev/duckdb-units-rs.git
+git clone --recurse-submodules https://github.com/sebastiaan-dev/duckdb-units-rs.git
 cd duckdb-units-rs
 make configure
 make release
@@ -101,6 +101,57 @@ by a factor of one billion. Use parentheses to make denominators explicit.
 UCUM annotations are accepted but do not enforce quantity kinds: `mg{total}` and `mg`
 are dimensionally equivalent. Annotations must not be used as a substitute for validation.
 
+## Discover units and audit unit columns
+
+```sql
+SELECT unit, name, property, supported
+FROM unit_search('pressure') ORDER BY unit;
+-- Includes Pa, bar, atm, [psi], ... and unsupported B[SPL], clearly marked.
+
+SELECT c.unit, c.factor, c.offset, c.base_unit
+FROM units_catalog() c WHERE unit IN ('Cel', 'Pa');
+
+SELECT unit_parse_checked('kg/m3');
+-- {definition: {dimension: 'L-3.M', base_unit: 'm-3.g', factor: 1000,
+--               offset: 0, is_affine: false}, status: 'ok', message: NULL}
+
+SELECT unit_parse_checked('Cel/s');
+-- {definition: NULL, status: 'unsupported_unit', message: ...}
+```
+
+The catalog contains **312 registered UCUM atoms**, of which **253 currently pass this
+extension's conversion policy**. This is not the number of supported expressions: prefixes,
+products, quotients, and powers generate many more, and are not enumerated as separate rows.
+Unsupported atoms remain visible with diagnostics; their parsed-definition columns are NULL.
+
+Both discovery tables have the same columns:
+
+- `unit`, `name`, `property`: the code, display name, and descriptive property from UCUM.
+- `prefixable`, `is_base`: registry flags; `prefixable` means the atom accepts UCUM prefixes.
+- `supported`, `status`, `message`: the extension's current support decision.
+- `dimension`, `base_unit`, `factor`, `offset`, `is_affine`: the same definition as `unit_parse`,
+  or NULL when unsupported. Qualify `offset` as `c.offset` or quote it in SQL.
+
+`property` is descriptive metadata, **not enforced quantity-kind validation**.
+`unit_search(query)` uses case-insensitive substring matching over codes, names, and properties.
+It is **not alias resolution**: finding `Cel` with `unit_search('celsius')` does not make
+`unit_convert(20, 'celsius', 'K')` valid. Search does not trim whitespace or interpret wildcards.
+An empty query lists all atoms; NULL returns zero rows. Queries are limited to 4096 bytes.
+Search arguments must be constant at binding/execution time (prepared parameters work),
+not correlated unit columns. Use `ORDER BY` when result order matters.
+
+To profile a dirty unit column without requiring measurement values:
+
+```sql
+WITH inputs(u) AS (
+    VALUES ('kg/m3'), ('Cel'), ('Cel/s'), ('madeup'), (NULL)
+), audited AS (
+    SELECT u, unit_parse_checked(u) AS result FROM inputs
+)
+SELECT result.status, count(*) AS rows
+FROM audited GROUP BY result.status ORDER BY result.status;
+```
+
 ## SQL API
 
 All measurement arguments/results are `DOUBLE`; unit arguments are `VARCHAR`.
@@ -113,9 +164,12 @@ All measurement arguments/results are `DOUBLE`; unit arguments are `VARCHAR`.
 | `unit_convert_delta_checked(value, source_unit, target_unit)` | Same diagnostic struct, for temperature differences |
 | `unit_compatible(source_unit, target_unit)` | Boolean dimensional compatibility; unknown/unsupported units raise errors |
 | `unit_parse(unit)` | `STRUCT(dimension VARCHAR, base_unit VARCHAR, factor DOUBLE, offset DOUBLE, is_affine BOOLEAN)` |
+| `unit_parse_checked(unit)` | `STRUCT(definition <unit_parse result>, status VARCHAR, message VARCHAR)`; failed/missing input has NULL definition |
 | `unit_dimension(unit)` | UCUM dimension vector as text |
 | `unit_valid(unit)` | Whether the unit is supported by **this extension**, not a full UCUM syntax validator |
 | `units_backend()` | Backend, UCUM, and extension-policy versions |
+| `units_catalog()` | Table: all registered atoms, definitions, and support diagnostics |
+| `unit_search(query)` | Table: case-insensitive discovery, same schema as `units_catalog()` |
 
 Function descriptions and examples are also in `duckdb_functions()`:
 
@@ -142,10 +196,12 @@ UCUM treats plane angle as a separate dimension, so `Hz` and `rad/s` are not com
 
 ### Errors and NULLs
 
-Strict functions propagate any NULL input to NULL. `unit_valid(NULL)` is also NULL.
+Strict scalar functions propagate any NULL input to NULL. `unit_valid(NULL)` is also NULL.
 Checked functions always return a struct: missing inputs produce `missing_input`, even
 if another argument is invalid. A successful struct has `status = 'ok'` and NULL message.
-Failed structs have NULL value, a stable status code, and explanatory text.
+Failed conversions have NULL `value`; failed parsing has NULL `definition`, including its
+nested fields. Both have a stable status code and explanatory text. Discovery table NULL
+behavior is described above.
 
 Statuses include `missing_input`, `invalid_syntax`, `unknown_unit`,
 `incompatible_dimension`, `unsupported_unit`, `invalid_delta_unit`,
@@ -157,8 +213,11 @@ The `overflow` status also covers numerical underflow to zero.
 - Parsing/definitions come from a pinned UCUM library, not hand-written conversion macros.
 - Native vector callbacks handle runtime unit columns and NULL/filtered inputs.
 - Each query worker has bounded caches: up to 256 parsed units and 256 conversion pairs,
-  including error results. Caches clear when full; inputs/errors are not retained globally.
+  including error results. Caches clear when full; user inputs/results are not retained globally.
   Repeated units are parsed on first execution, **not yet at bind time**.
+- Discovery tables share an immutable cache of the library's atom definitions and support
+  decisions. Table scans have independent cursors, exact cardinality, and projection pushdown.
+  Filters remain evaluated by DuckDB; search does not mutate the registry or parser.
 - Ordinary conversions use precomputed scale/offset and fused multiply-add. Extreme ratios
   and numerical boundary results use the backend's wider decimal arithmetic before narrowing
   the final value to `DOUBLE`. Decimal factors have up to 28 significant digits; SQL results
@@ -174,7 +233,7 @@ The `overflow` status also covers numerical underflow to zero.
 - Compatibility checks dimensions, **not semantic quantity kinds**: energy and torque are
   dimensionally compatible. The extension does not infer what a measurement represents, enforce
   absolute zero, propagate uncertainty, or validate physical plausibility.
-- No custom numeric type, quantity algebra, alias registry, or unit-discovery table yet.
+- No custom numeric type, quantity algebra, or alias registry yet.
 - Native macOS arm64 has been exercised locally. The template retains WASM and distribution
   wiring, but local success is not a claim of validation on every platform.
 
@@ -186,19 +245,28 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 make release
 make test_release
+configure/venv/bin/python3 scripts/test_build_metadata.py
 ```
 
 The build delegates to Cargo; Make configures the SQL test environment and adds the DuckDB
-extension metadata footer. `make debug && make test_debug` is also supported.
+extension metadata footer. `make debug && make test_debug` is also supported. Each build
+refreshes revision metadata (or the explicit `EXTENSION_VERSION` override) before packaging;
+rebuilding no longer reuses a stale revision from an earlier `make configure`. The metadata
+regression test rebuilds and loads the extension in isolated processes; run it serially, not
+alongside another build of the same output directory.
 
 Layout:
 
-- `crates/engine/`: DuckDB-independent parsing/conversion policy and numerical tests.
-- `crates/core/`: SQL registration, vector callbacks, checked structs, and bounded caches.
+- `crates/engine/`: DuckDB-independent parsing/conversion policy, immutable atom catalog, and tests.
+- `crates/core/`: SQL registration, scalar/table callbacks, checked structs, and bounded caches.
 - `crates/native/`: native `units` entrypoint.
 - `crates/wasm/`: shared-core WASM entrypoint inherited from the template.
 - `test/sql/units.test`: end-to-end SQLLogicTest coverage, including mixed-unit columns,
   temperature semantics, diagnostics, high-cardinality inputs, and numerical regressions.
+- `test/sql/discovery.test`: registry/parser consistency, discovery queries, table projections,
+  repeated/prepared scans, and checked nested-struct validity across chunks.
+
+See [the roadmap](docs/ROADMAP.md) for the remaining release gates and planned scope.
 
 For a DuckDB version upgrade, update the workspace binding dependency, entrypoint API versions,
 Makefile target, distribution workflow and CI-tools submodule together, then clean/reconfigure

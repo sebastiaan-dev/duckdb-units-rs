@@ -1,4 +1,4 @@
-.PHONY: clean clean_all demo
+.PHONY: clean clean_all demo refresh_extension_version
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -29,6 +29,13 @@ else
 endif
 
 configure: venv platform extension_version
+
+# CI tools cache configure/extension_version.txt. Refresh it before packaging,
+# so local rebuilds follow HEAD and respect changes to EXTENSION_VERSION.
+refresh_extension_version: check_configure
+	@$(VERSION_COMMAND)
+
+build_extension_with_metadata_debug build_extension_with_metadata_release: refresh_extension_version
 
 debug: build_extension_library_debug build_extension_with_metadata_debug
 release: build_extension_library_release build_extension_with_metadata_release

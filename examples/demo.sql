@@ -52,6 +52,22 @@ FROM (SELECT u, unit_parse(u) AS p FROM (VALUES ('kg/m3'), ('kW.h'), ('Cel')) t(
 SELECT unit_convert(1, 'MW', 'mW') AS milliwatts_in_one_megawatt;
 
 .print ''
+.print '7. Discover pressure units, including explicit support status'
+SELECT unit, name, supported, status
+FROM unit_search('pressure') ORDER BY unit;
+
+.print ''
+.print '8. Profile unit strings without needing measurement values'
+WITH inputs(u) AS (
+    VALUES ('kg/m3'), ('Cel'), ('Cel/s'), ('celsius'), (NULL)
+), parsed AS (
+    SELECT u, unit_parse_checked(u) AS result FROM inputs
+)
+SELECT u AS source_unit, result.status, result.definition.dimension,
+       result.definition.factor, result.definition.is_affine
+FROM parsed;
+
+.print ''
 .print 'Backend and policy provenance'
 SELECT units_backend();
 

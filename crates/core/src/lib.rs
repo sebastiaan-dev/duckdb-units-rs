@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod cache;
+mod catalog;
 
 use cache::Cache;
 use duckdb_neo::{
@@ -131,9 +132,46 @@ struct UnitInfo {
     is_affine: bool,
 }
 
+impl From<&units_engine::ParsedUnit> for UnitInfo {
+    fn from(parsed: &units_engine::ParsedUnit) -> Self {
+        Self {
+            dimension: parsed.dimension.clone(),
+            base_unit: parsed.base_unit.clone(),
+            factor: parsed.factor,
+            offset: parsed.offset,
+            is_affine: parsed.is_affine,
+        }
+    }
+}
+
+#[derive(Debug, AsDuckDB)]
+struct CheckedParse {
+    definition: Option<UnitInfo>,
+    status: String,
+    message: Option<String>,
+}
+
+impl CheckedParse {
+    fn from_result(result: std::result::Result<UnitInfo, UnitError>) -> Self {
+        match result {
+            Ok(definition) => Self {
+                definition: Some(definition),
+                status: "ok".into(),
+                message: None,
+            },
+            Err(error) => Self {
+                definition: None,
+                status: error.status.into(),
+                message: Some(error.message),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Inspect {
     Parse,
+    ParseChecked,
     Dimension,
     Valid,
     Backend,
@@ -196,16 +234,19 @@ impl ScalarCallbacks for Inspect {
                         .map(|unit| cache.parse(unit))
                         .transpose()
                         .map_err(sql_error)?;
-                    writer.set(
-                        row,
-                        parsed.map(|p| UnitInfo {
-                            dimension: p.dimension.clone(),
-                            base_unit: p.base_unit.clone(),
-                            factor: p.factor,
-                            offset: p.offset,
-                            is_affine: p.is_affine,
-                        }),
-                    )?;
+                    writer.set(row, parsed.map(|p| UnitInfo::from(p.as_ref())))?;
+                }
+            }
+            Self::ParseChecked => {
+                let mut output = output.cast::<CheckedParse>()?;
+                output.set_size(rows)?;
+                let mut writer = output.writer()?;
+                for (row, unit) in input.iter().enumerate() {
+                    let result = match unit {
+                        Some(unit) => cache.parse(unit).map(|p| UnitInfo::from(p.as_ref())),
+                        None => Err(UnitError::new("missing_input", "unit must be present")),
+                    };
+                    writer.set(row, Some(CheckedParse::from_result(result)))?;
                 }
             }
             Self::Backend => unreachable!(),
@@ -252,6 +293,7 @@ impl ScalarCallbacks for Compatible {
 }
 
 pub fn register(extension: &Extension) -> Result<()> {
+    catalog::register(extension)?;
     for (name, delta, checked, description, example) in [
         (
             "unit_convert",
@@ -312,6 +354,12 @@ pub fn register(extension: &Extension) -> Result<()> {
             "SELECT unit_parse('kg/m3')",
         ),
         (
+            "unit_parse_checked",
+            Inspect::ParseChecked,
+            "Parse without aborting on data errors: returns STRUCT(definition, status, message), with the same definition as unit_parse. NULL input has status missing_input.",
+            "SELECT unit_parse_checked('Cel/s')",
+        ),
+        (
             "unit_dimension",
             Inspect::Dimension,
             "Return the UCUM dimension vector as text; does not infer semantic quantity kinds.",
@@ -332,6 +380,7 @@ pub fn register(extension: &Extension) -> Result<()> {
     ] {
         let result_type = match op {
             Inspect::Parse => UnitInfo::logical_type(extension)?,
+            Inspect::ParseChecked => CheckedParse::logical_type(extension)?,
             Inspect::Valid => bool::logical_type(extension)?,
             _ => String::logical_type(extension)?,
         };
@@ -343,6 +392,10 @@ pub fn register(extension: &Extension) -> Result<()> {
         }
         ScalarFunctionBuilder::new(name, signature, op)
             .with_init()
+            .set_property(FunctionProperty::HasSpecialNullHandling(matches!(
+                op,
+                Inspect::ParseChecked
+            )))
             .set_property(FunctionProperty::CollationHandling(
                 FunctionPropertyCollation::Ignore,
             ))

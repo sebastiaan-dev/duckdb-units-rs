@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,3 +49,12 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      - name: Configure SQL tests
+        run: make configure
+
+      - name: Build and test the release extension
+        run: make release && make test_release
+
+      - name: Verify rebuilt binary metadata
+        run: configure/venv/bin/python3 scripts/test_build_metadata.py
