@@ -29,14 +29,23 @@ impl Cache {
     }
 
     // Each function instance has a fixed delta mode, so it need not be part of the key.
-    pub fn plan(&mut self, from: &str, to: &str, delta: bool) -> Outcome<ConversionPlan> {
+    pub fn convert(&mut self, value: f64, from: &str, to: &str, delta: bool) -> Outcome<f64> {
+        // Use the cached plan by reference: copying its wide decimal coefficients
+        // for every row is unnecessary and sensitive to compiler inlining.
+        let evaluate = |result: &Outcome<ConversionPlan>| {
+            result
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|plan| plan.convert(value))
+        };
         if let Some(result) = self.plans.get(from).and_then(|targets| targets.get(to)) {
-            return result.clone();
+            return evaluate(result);
         }
         let result = self.parse(from).and_then(|a| {
             self.parse(to)
                 .and_then(|b| ConversionPlan::new(&a, &b, delta))
         });
+        let converted = evaluate(&result);
         if from.len() <= MAX_UNIT_BYTES && to.len() <= MAX_UNIT_BYTES {
             if self.plan_count == CAPACITY {
                 self.plans.clear();
@@ -45,10 +54,10 @@ impl Cache {
             self.plans
                 .entry(from.to_owned())
                 .or_default()
-                .insert(to.to_owned(), result.clone());
+                .insert(to.to_owned(), result);
             self.plan_count += 1;
         }
-        result
+        converted
     }
 }
 
@@ -56,16 +65,41 @@ impl Cache {
 mod tests {
     use super::*;
     #[test]
+    fn cached_plans_do_not_cache_value_dependent_errors() {
+        let mut cache = Cache::default();
+        assert_eq!(
+            cache
+                .convert(f64::NAN, "km", "m", false)
+                .unwrap_err()
+                .status,
+            "non_finite_input"
+        );
+        assert_eq!(cache.convert(1.0, "km", "m", false).unwrap(), 1000.0);
+        assert_eq!(
+            cache
+                .convert(f64::MAX, "km", "m", false)
+                .unwrap_err()
+                .status,
+            "overflow"
+        );
+        assert_eq!(cache.convert(2.0, "km", "m", false).unwrap(), 2000.0);
+        assert_eq!(
+            cache
+                .convert(f64::NAN, "madeup", "m", false)
+                .unwrap_err()
+                .status,
+            "unknown_unit"
+        );
+    }
+
+    #[test]
     fn cache_is_bounded_including_failures() {
         let mut cache = Cache::default();
         for i in 0..1024 {
-            let _ = cache.plan(&format!("unknown{i}"), "m", false);
+            let _ = cache.convert(1.0, &format!("unknown{i}"), "m", false);
             assert!(cache.units.len() <= CAPACITY);
             assert!(cache.plan_count <= CAPACITY);
         }
-        assert_eq!(
-            cache.plan("km", "m", false).unwrap().convert(1.0).unwrap(),
-            1000.0
-        );
+        assert_eq!(cache.convert(1.0, "km", "m", false).unwrap(), 1000.0);
     }
 }

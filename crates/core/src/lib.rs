@@ -154,9 +154,7 @@ impl ScalarCallbacks for Convert {
                         value: Option<&f64>,
                         from: Option<&str>,
                         to: Option<&str>| match (value, from, to) {
-            (Some(v), Some(a), Some(b)) => cache
-                .plan(a, b, self.delta)
-                .and_then(|plan| plan.convert(*v)),
+            (Some(v), Some(a), Some(b)) => cache.convert(*v, a, b, self.delta),
             _ => Err(missing_conversion_input()),
         };
         if self.checked {

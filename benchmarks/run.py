@@ -114,7 +114,8 @@ CHECKPOINT;
     invocation = [
         "hyperfine", "--warmup", str(args.warmup), "--runs", str(args.runs),
         "--export-json", str(output / "hyperfine.json"),
-        "-L", "case", ",".join(names), "-L", "variant", "baseline,optimized", measured,
+        # Hyperfine expands the first parameter innermost: keep each matched pair adjacent.
+        "-L", "variant", "baseline,optimized", "-L", "case", ",".join(names), measured,
     ]
     manifest["invocation"] = invocation
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
