@@ -6,7 +6,7 @@ pub mod catalog;
 pub mod quantity;
 
 use octofhir_ucum::{Dimension, ErrorKind, Number, SpecialKind};
-use std::fmt;
+use std::fmt::{self, Write};
 
 pub const BACKEND: &str = concat!(
     "octofhir-ucum 0.9.2; UCUM 2.2; units policy ",
@@ -14,7 +14,7 @@ pub const BACKEND: &str = concat!(
 );
 pub const MAX_UNIT_BYTES: usize = 4096;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnitError {
     pub status: &'static str,
     pub message: String,
@@ -71,7 +71,13 @@ fn overflow() -> UnitError {
 }
 
 fn finite_factor(number: Number) -> Result<f64> {
-    let value = number.to_f64();
+    // The common identity factor is exact; avoid the backend's decimal-format /
+    // decimal-parse round trip without changing rounding for any other factor.
+    let value = if number == Number::ONE {
+        1.0
+    } else {
+        number.to_f64()
+    };
     if value.is_finite() && value > 0.0 {
         Ok(value)
     } else {
@@ -105,25 +111,31 @@ pub fn parse(unit: &str) -> Result<ParsedUnit> {
         ));
     }
     // Prefixes/numeric factors on special units apply to their input scale.
-    let exact_factor = info.factor.checked_mul(info.scale).ok_or_else(overflow)?;
+    let exact_factor = if info.scale == Number::ONE {
+        info.factor
+    } else {
+        info.factor.checked_mul(info.scale).ok_or_else(overflow)?
+    };
     let factor = finite_factor(exact_factor)?;
     let offset = info.offset.to_f64();
     if !offset.is_finite() {
         return Err(overflow());
     }
-    let base_unit = Dimension::BASE_UNITS
-        .iter()
-        .zip(info.dimension.0)
-        .filter(|(_, exp)| *exp != 0)
-        .map(|(symbol, exp)| {
-            if exp == 1 {
-                (*symbol).to_owned()
-            } else {
-                format!("{symbol}{exp}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(".");
+    // Render directly, rather than allocating a Vec and a String per base unit
+    // and then joining them into a second output allocation.
+    let mut base_unit = String::new();
+    for (symbol, exp) in Dimension::BASE_UNITS.iter().zip(info.dimension.0) {
+        if exp == 0 {
+            continue;
+        }
+        if !base_unit.is_empty() {
+            base_unit.push('.');
+        }
+        base_unit.push_str(symbol);
+        if exp != 1 {
+            write!(&mut base_unit, "{exp}").expect("writing to a String cannot fail");
+        }
+    }
     Ok(ParsedUnit {
         dimension: info.dimension.to_string(),
         base_unit: if base_unit.is_empty() {
@@ -144,7 +156,7 @@ pub fn compatible(from: &ParsedUnit, to: &ParsedUnit) -> bool {
     from.dims == to.dims
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConversionPlan {
     scale: Number,
     offset: Number,
@@ -227,6 +239,20 @@ mod tests {
             "{actual} != {expected}"
         );
     }
+    #[test]
+    fn base_unit_rendering_preserves_symbols_and_exponents() {
+        for (unit, base) in [
+            ("1", "1"),
+            ("m", "m"),
+            ("Pa", "m-1.s-2.g"),
+            ("V", "m2.s-2.g.C-1"),
+            ("m-128", "m-128"),
+            ("m127", "m127"),
+        ] {
+            assert_eq!(parse(unit).unwrap().base_unit, base, "{unit}");
+        }
+    }
+
     #[test]
     fn compounds_and_prefixes() {
         for (v, a, b, expected) in [

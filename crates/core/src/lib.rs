@@ -8,16 +8,17 @@ mod quantity;
 use cache::Cache;
 use duckdb_neo::{
     AsDuckDB, DuckDBType, Result,
+    bind_arguments::BindArguments,
     connection::Context,
     data_chunk::VectorCollection,
     enums::{FunctionProperty, FunctionPropertyCollation},
     error::Error,
     extension::Extension,
-    scalar::{ScalarCallbacks, ScalarFunctionBuilder, ScalarInitCallbacks},
+    scalar::{ScalarBindCallbacks, ScalarCallbacks, ScalarFunctionBuilder, ScalarInitCallbacks},
     signature::{FunctionDocumentationBuilder, FunctionParameter, SignatureBuilder},
     vector::{Unknown, Vector},
 };
-use units_engine::UnitError;
+use units_engine::{ConversionPlan, UnitError};
 
 fn sql_error(error: UnitError) -> Error {
     Error::invalid_input(format!("units: {error}"))
@@ -55,26 +56,96 @@ impl CheckedConversion {
     }
 }
 
+type BoundConversion = Option<std::result::Result<ConversionPlan, UnitError>>;
+
+fn missing_conversion_input() -> UnitError {
+    UnitError::new(
+        "missing_input",
+        "value, source unit, and target unit must all be present",
+    )
+}
+
 struct Convert {
     delta: bool,
     checked: bool,
 }
+
+impl ScalarBindCallbacks for Convert {
+    fn bind(&self, _: &Context, arguments: BindArguments<'_>) -> Result<BoundConversion> {
+        // Only specialize two foldable unit arguments. Folding failures also
+        // fall back: an unused CASE branch must not start raising bind errors.
+        let (Ok(Some(from)), Ok(Some(to))) = (arguments.value(1), arguments.value(2)) else {
+            return Ok(None);
+        };
+        let (Ok(from), Ok(to)) = (from.get::<String>(), to.get::<String>()) else {
+            return Ok(None);
+        };
+        let plan = match (from, to) {
+            (Some(from), Some(to)) => units_engine::parse(&from).and_then(|a| {
+                units_engine::parse(&to).and_then(|b| ConversionPlan::new(&a, &b, self.delta))
+            }),
+            _ => Err(missing_conversion_input()),
+        };
+        // Keep errors as data until a non-NULL row actually needs conversion.
+        // Empty scans, NULLs, TRY, and checked diagnostics retain their semantics.
+        Ok(Some(plan))
+    }
+}
+
+impl Convert {
+    fn exec_constant(
+        &self,
+        plan: &std::result::Result<ConversionPlan, UnitError>,
+        vectors: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> Result<()> {
+        let values = vectors.get_vector_at::<f64>(0)?.reader()?;
+        let evaluate = |value: &f64| {
+            plan.as_ref()
+                .map_err(Clone::clone)
+                .and_then(|p| p.convert(*value))
+        };
+        if self.checked {
+            let mut output = output.cast::<CheckedConversion>()?;
+            output.set_size(vectors.row_count()?)?;
+            let mut writer = output.writer()?;
+            for (row, value) in values.iter().enumerate() {
+                let result = value
+                    .map(evaluate)
+                    .unwrap_or_else(|| Err(missing_conversion_input()));
+                writer.set(row, Some(CheckedConversion::from_result(result)))?;
+            }
+        } else {
+            let mut output = output.cast::<f64>()?;
+            output.set_size(vectors.row_count()?)?;
+            let mut writer = output.writer()?;
+            for (row, value) in values.iter().enumerate() {
+                writer.set(row, value.map(evaluate).transpose().map_err(sql_error)?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ScalarInitCallbacks for Convert {
-    fn init(&self, _: Option<&()>, _: &Context) -> Result<Cache> {
+    fn init(&self, _: Option<&BoundConversion>, _: &Context) -> Result<Cache> {
         Ok(Cache::default())
     }
 }
 impl ScalarCallbacks for Convert {
-    type BindData = ();
+    type BindData = BoundConversion;
     type InitData = Cache;
     fn exec(
         &self,
-        _: Option<&()>,
+        bound: Option<&BoundConversion>,
         init: Option<&mut Cache>,
         _: &Context,
         vectors: &mut VectorCollection,
         output: Vector<'_, Unknown>,
     ) -> Result<()> {
+        if let Some(Some(plan)) = bound {
+            return self.exec_constant(plan, vectors, output);
+        }
         let cache = state(init)?;
         let values = vectors.get_vector_at::<f64>(0)?.reader()?;
         let sources = vectors.get_vector_at::<String>(1)?.reader()?;
@@ -86,10 +157,7 @@ impl ScalarCallbacks for Convert {
             (Some(v), Some(a), Some(b)) => cache
                 .plan(a, b, self.delta)
                 .and_then(|plan| plan.convert(*v)),
-            _ => Err(UnitError::new(
-                "missing_input",
-                "value, source unit, and target unit must all be present",
-            )),
+            _ => Err(missing_conversion_input()),
         };
         if self.checked {
             let mut output = output.cast::<CheckedConversion>()?;
@@ -341,6 +409,7 @@ pub fn register(extension: &Extension) -> Result<()> {
                 .documentation(docs(description, example)),
             Convert { delta, checked },
         )
+        .with_bind()
         .with_init()
         .set_property(FunctionProperty::HasSpecialNullHandling(checked))
         .set_property(FunctionProperty::CollationHandling(

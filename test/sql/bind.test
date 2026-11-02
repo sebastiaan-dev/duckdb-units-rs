@@ -1,0 +1,142 @@
+# name: test/sql/bind.test
+# description: Constant-unit specialization preserves execution-time errors and NULLs
+# group: [units]
+
+require units
+
+query R
+SELECT unit_convert(v,'madeup','m') FROM (VALUES (NULL::DOUBLE),(NULL)) t(v);
+----
+NULL
+NULL
+
+query R
+SELECT unit_convert(i::DOUBLE,'madeup','m') FROM range(0) t(i);
+----
+
+query I
+SELECT CASE WHEN i=0 THEN 42 ELSE unit_convert(i::DOUBLE,'madeup','m') END FROM range(1) t(i);
+----
+42
+
+# Even a failure while folding a unit argument must remain in its unused branch.
+query I
+SELECT CASE WHEN i=0 THEN 42 ELSE unit_convert(i::DOUBLE,CAST('bad' AS INTEGER)::VARCHAR,'m') END
+FROM range(1) t(i);
+----
+42
+
+query R
+SELECT TRY(unit_convert(v,'madeup','m')) FROM (VALUES (NULL::DOUBLE),(1),(2)) t(v);
+----
+NULL
+NULL
+NULL
+
+query IT
+SELECT id,(unit_convert_checked(v,'madeup','m')).status
+FROM (VALUES (1,NULL::DOUBLE),(2,0),(3,1)) t(id,v) ORDER BY id;
+----
+1	missing_input
+2	unknown_unit
+3	unknown_unit
+
+query TTT
+SELECT (unit_convert_checked(1,NULL,'m')).status,
+       (unit_convert_checked('NaN'::DOUBLE,'m',NULL)).status,
+       (unit_convert_delta_checked(NULL,'m','cm')).status;
+----
+missing_input	missing_input	missing_input
+
+query IT
+SELECT id,(unit_convert_checked(v,'W.h','J')).status
+FROM (VALUES (1,NULL::DOUBLE),(2,1),(3,'NaN'::DOUBLE),(4,'Infinity'::DOUBLE),(5,1.7e308)) t(id,v)
+ORDER BY id;
+----
+1	missing_input
+2	ok
+3	non_finite_input
+4	non_finite_input
+5	overflow
+
+# Literal and column-driven units produce identical checked structs, including messages.
+query I
+SELECT count(*) FROM (
+    SELECT unit_convert_checked(v,'Cel','[degF]') AS a,
+           unit_convert_checked(v,u,t) AS b
+    FROM (VALUES (0.0,'Cel','[degF]'),(20.0,'Cel','[degF]'),(NULL,'Cel','[degF]')) data(v,u,t)
+) WHERE a IS DISTINCT FROM b;
+----
+0
+
+statement ok
+PREPARE bound_units AS SELECT unit_convert(v,$1,$2), unit_convert_delta(v,$1,$2)
+FROM (VALUES (0.0),(10.0),(NULL)) t(v);
+
+query RR
+EXECUTE bound_units('Cel','[degF]');
+----
+32.0	0.0
+50.0	18.0
+NULL	NULL
+
+query RR
+EXECUTE bound_units('Cel','K');
+----
+273.15	0.0
+283.15	10.0
+NULL	NULL
+
+query RR
+EXECUTE bound_units(NULL,'K');
+----
+NULL	NULL
+NULL	NULL
+NULL	NULL
+
+# Distinct bound plans must not be merged by optimizer equality/common expressions.
+query IRRR
+SELECT i,unit_convert(i,'Cel','K'),unit_convert(i,'Cel','[degF]'),unit_convert_delta(i,'Cel','[degF]')
+FROM range(2) t(i);
+----
+0	273.15	32.0	0.0
+1	274.15	33.8	1.8
+
+query RI
+SELECT unit_convert(i,'km','m') AS v,count(*) FROM range(4) t(i)
+GROUP BY unit_convert(i,'km','m') ORDER BY v;
+----
+0.0	1
+1000.0	1
+2000.0	1
+3000.0	1
+
+query III
+SELECT count(*),count(v),count(*) FILTER (WHERE v IS DISTINCT FROM
+    CASE WHEN i%7=0 THEN NULL ELSE i::DOUBLE*1000 END)
+FROM (SELECT i,unit_convert(CASE WHEN i%7=0 THEN NULL ELSE i::DOUBLE END,'km','m') AS v
+      FROM range(10000) t(i) WHERE i%3<>0);
+----
+6666	5714	0
+
+statement ok
+PREPARE checked_bound AS SELECT (unit_convert_checked(v,$1,$2)).status
+FROM (VALUES (1.0),(NULL)) t(v) ORDER BY v NULLS LAST;
+
+query T
+EXECUTE checked_bound('madeup','m');
+----
+unknown_unit
+missing_input
+
+query T
+EXECUTE checked_bound('m','cm');
+----
+ok
+missing_input
+
+query T
+EXECUTE checked_bound(NULL,'cm');
+----
+missing_input
+missing_input
