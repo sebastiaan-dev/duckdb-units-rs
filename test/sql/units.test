@@ -1,0 +1,210 @@
+# name: test/sql/units.test
+# description: End-to-end units API, numeric policy, and vectorized execution
+# group: [units]
+
+require units
+
+query IIIII
+SELECT unit_convert(1, 'kg/m3', 'g/L') = 1,
+       unit_convert(1, 'kW.h', 'J') = 3600000,
+       unit_convert(1, 'Pa', 'kg/(m.s2)') = 1,
+       abs(unit_convert(1, '[in_i]', 'cm') - 2.54) < 1e-12,
+       unit_convert(1, 'MW' COLLATE nocase, 'mW' COLLATE nocase) = 1e9;
+----
+true	true	true	true	true
+
+query IIII
+SELECT unit_convert(0, 'Cel', '[degF]') = 32,
+       abs(unit_convert(20, 'Cel', 'K') - 293.15) < 1e-12,
+       unit_convert_delta(20, 'Cel', 'K') = 20,
+       unit_convert_delta(10, 'Cel', '[degF]') = 18;
+----
+true	true	true	true
+
+query IIII
+SELECT unit_compatible('Pa','kg/(m.s2)'), unit_compatible('kg','m'),
+       unit_compatible('J','N.m'), unit_compatible('Hz','rad/s');
+----
+true	false	true	false
+
+query TTIII
+SELECT p.dimension, p.base_unit, p.factor, p.offset, p.is_affine
+FROM (SELECT unit_parse('kg/m3') AS p);
+----
+L-3.M	m-3.g	1000	0	false
+
+query TII
+SELECT unit_dimension('1'), unit_valid('madeup'), unit_valid('kg/m3');
+----
+1	false	true
+
+query III
+SELECT p.factor = 1, abs(p.offset-273.15) < 1e-12, p.is_affine
+FROM (SELECT unit_parse('Cel') AS p);
+----
+true	true	true
+
+# Do not guess human spellings or flatten special temperature units into ratios.
+query I
+SELECT count(*) FILTER (WHERE unit_valid(u))
+FROM (VALUES ('kg/m^3'), ('kWh'), ('Celsius'), ('m s'), ('µm'),
+             ('Cel/s'), ('Cel2'), ('Cel/Cel'), ('dB'), ('[IU]'), ('[pH]'), ('')) t(u);
+----
+0
+
+statement error
+SELECT unit_convert(1, 'kg', 'm');
+----
+incompatible_dimension
+
+statement error
+SELECT unit_convert(1, 'madeup', 'm');
+----
+unknown_unit
+
+statement error
+SELECT unit_compatible('madeup', 'm');
+----
+unknown_unit
+
+statement error
+SELECT unit_parse('Cel/s');
+----
+unsupported_unit
+
+statement error
+SELECT unit_convert_delta(1, 'm', 'cm');
+----
+invalid_delta_unit
+
+# Checked results separate good, missing, malformed, unknown and incompatible rows.
+query ITI
+SELECT id, result.status, result.value IS NULL
+FROM (SELECT id, unit_convert_checked(v, u, 'kW.h') AS result
+      FROM (VALUES (1, 3600000.0, 'J'), (2, 1.0, 'kg'), (3, 1.0, 'madeup'),
+                   (4, NULL, 'J'), (5, 1.0, NULL), (6, 1.0, 'm//s')) t(id,v,u))
+ORDER BY id;
+----
+1	ok	false
+2	incompatible_dimension	true
+3	unknown_unit	true
+4	missing_input	true
+5	missing_input	true
+6	invalid_syntax	true
+
+query TTT
+SELECT (unit_convert_checked(NULL,'m','m')).status,
+       (unit_convert_checked(1,'m',NULL)).status,
+       (unit_convert_delta_checked(10,'Cel','[degF]')).status;
+----
+missing_input	missing_input	ok
+
+query III
+SELECT (unit_convert_delta_checked(10,'Cel','[degF]')).value = 18,
+       (unit_convert_checked(1,'m','m')).message IS NULL,
+       (unit_convert_checked(1,'kg','m')).message IS NOT NULL;
+----
+true	true	true
+
+query TTTTTT
+SELECT unit_convert(NULL,'m','m'), unit_convert(1,NULL,'m'), unit_convert(1,'m',NULL),
+       unit_parse(NULL), unit_compatible(NULL,'m'), unit_valid(NULL);
+----
+NULL	NULL	NULL	NULL	NULL	NULL
+
+query TTTT
+SELECT (unit_convert_checked('NaN'::DOUBLE, 'm','m')).status,
+       (unit_convert_checked('Infinity'::DOUBLE, 'm','m')).status,
+       (unit_convert_checked(1.7e308, 'km','m')).status,
+       (unit_convert_delta_checked(1,'m','cm')).status;
+----
+non_finite_input	non_finite_input	overflow	invalid_delta_unit
+
+# Do not round an extreme unit ratio before applying a compensating measurement.
+query IIII
+SELECT abs(unit_convert(1e308, '4.10*-300.m', '10*24.m') / 4e-16 - 1) < 1e-12,
+       abs(unit_convert(1e-300, '10*300.m', '10*-300.m') / 1e300 - 1) < 1e-12,
+       abs(unit_convert(1e300, '10*-300.m', '10*300.m') / 1e-300 - 1) < 1e-12,
+       unit_convert(0, '10*300.m', '10*-300.m') = 0;
+----
+true	true	true	true
+
+# Dimensional overflow must never turn incompatible expressions into compatible ones.
+query III
+SELECT unit_valid('m120.m120'), unit_valid('(m100)100'), unit_valid('10*1000');
+----
+false	false	false
+
+query TT
+SELECT (unit_convert_checked(1,repeat('m',4097),'m')).status,
+       (unit_convert_checked(1,repeat('(',150)||'m'||repeat(')',150),'m')).status;
+----
+resource_limit	resource_limit
+
+# Metadata is discoverable, with no template functions left behind.
+query II
+SELECT count(*), count(*) FILTER (WHERE description IS NOT NULL)
+FROM duckdb_functions() WHERE categories = ['units'];
+----
+9	9
+
+query I
+SELECT contains(units_backend(), 'octofhir-ucum 0.9.2');
+----
+true
+
+# Runtime inputs cross many chunks, including filtered/dictionary vectors and NULLs.
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TABLE readings AS
+SELECT i, CASE WHEN i%7=0 THEN NULL ELSE i::DOUBLE END AS v,
+       CASE WHEN i%2=0 THEN 'J' ELSE 'W.h' END AS u
+FROM range(100000) t(i);
+
+query III
+SELECT count(*), count(unit_convert(v,u,'J')),
+       count(*) FILTER (WHERE abs(unit_convert(v,u,'J') - v * CASE WHEN u='J' THEN 1 ELSE 3600 END) > 1e-8)
+FROM readings WHERE i%3<>0;
+----
+66666	57142	0
+
+query III
+SELECT count(*) FILTER (WHERE r.status='ok'),
+       count(*) FILTER (WHERE r.status='missing_input'),
+       count(*) FILTER (WHERE r.status NOT IN ('ok','missing_input'))
+FROM (SELECT unit_convert_checked(v,u,'J') AS r FROM readings);
+----
+85714	14286	0
+
+# High cardinality exceeds cache capacity, including cached error results.
+query III
+SELECT count(*), count(*) FILTER (WHERE c.status='ok' AND c.value=1),
+       count(*) FILTER (WHERE unit_valid(u))
+FROM (SELECT 'm{sample_'||i||'}' AS u, unit_convert_checked(1,u,'m') AS c
+      FROM range(3000) t(i));
+----
+3000	3000	3000
+
+query II
+SELECT count(*), count(*) FILTER (WHERE c.status='unknown_unit')
+FROM (SELECT unit_convert_checked(1, 'unknown'||i, 'm') AS c FROM range(3000) t(i));
+----
+3000	3000
+
+statement ok
+PREPARE temperature AS SELECT unit_convert($1, 'Cel', '[degF]'), unit_convert_delta($1, 'Cel', '[degF]');
+
+query RR
+EXECUTE temperature(0);
+----
+32.0	0.0
+
+query RR
+EXECUTE temperature(10);
+----
+50.0	18.0
+
+statement ok
+DROP TABLE readings;

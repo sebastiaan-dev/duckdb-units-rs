@@ -1,8 +1,8 @@
-.PHONY: clean clean_all
+.PHONY: clean clean_all demo
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-EXTENSION_NAME=rusty_quack
+EXTENSION_NAME=units
 
 # Mark the extension as C_STRUCT_UNSTABLE: DuckDB 2.x requires the _init_c_api_v2 entrypoint.
 # Binaries load only in the exact TARGET_DUCKDB_VERSION, not in newer DuckDB releases.
@@ -11,6 +11,8 @@ CAPI_VERSION=2
 
 # Target DuckDB version
 TARGET_DUCKDB_VERSION=v2.0.0
+# The unstable API requires the test runner and binary to match the target.
+DUCKDB_TEST_VERSION ?= $(patsubst v%,%,$(TARGET_DUCKDB_VERSION))
 
 all: configure debug
 
@@ -21,9 +23,9 @@ include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 # Build workspace libraries rather than the CI tools' Wasm example target.
 IS_EXAMPLE=
 ifneq ($(DUCKDB_WASM_PLATFORM),)
-	TARGET_INFO=--target $(TARGET) --package rusty_quack_wasm
+	TARGET_INFO=--target $(TARGET) --package units_wasm
 else
-	TARGET_INFO+=--package rusty_quack
+	TARGET_INFO+=--package units
 endif
 
 configure: venv platform extension_version
@@ -34,6 +36,9 @@ release: build_extension_library_release build_extension_with_metadata_release
 test: test_debug
 test_debug: test_extension_debug
 test_release: test_extension_release
+
+demo: release
+	./scripts/demo.sh
 
 clean: clean_build clean_rust
 clean_all: clean_configure clean

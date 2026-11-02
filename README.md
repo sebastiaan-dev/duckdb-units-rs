@@ -1,196 +1,205 @@
-# DuckDB Rust extension template
-This is an **experimental** template for Rust based extensions based on the C Extension API of DuckDB. The goal is to
-turn this eventually into a stable basis for pure-Rust DuckDB extensions that can be submitted to the Community extensions
-repository
+# units — physical units for DuckDB, in Rust
 
-Features:
-- No DuckDB build required
-- No C++ or C code required
-- CI/CD chain preconfigured
-- (Coming soon) Works with community extensions
+A native DuckDB **2.0.0 / C Extension API v2** extension for unit conversion,
+compound-unit parsing, dimensional compatibility, and auditable measurement normalization.
 
-## Cloning
+**Status: working initial demo, not a production release.** No worker process or custom
+numeric type. Not yet published to the DuckDB community registry.
 
-Clone the repo with submodules
+Built from [duckdb/extension-template-rs](https://github.com/duckdb/extension-template-rs),
+using `duckdb-neo = 0.20000.1` and
+[`octofhir-ucum = 0.9.2`](https://github.com/octofhir/ucum-rs).
+Unit syntax and definitions follow **UCUM 2.2**, case-sensitive. The upstream engine
+reports UCUM conformance; this extension intentionally exposes a smaller conversion
+surface and does **not** claim independently certified/full UCUM compliance.
 
-```shell
-git clone --recurse-submodules <repo>
-```
+## Run the demo
 
-## Dependencies
-In principle, these extensions can be compiled with the Rust toolchain alone. However, this template relies on some additional
-tooling to make life a little easier and to be able to share CI/CD infrastructure with extension templates for other languages:
-
-- Python3
-- Python3-venv
-- [Make](https://www.gnu.org/software/make)
-- Git
-
-Installing these dependencies will vary per platform:
-- For Linux, these come generally pre-installed or are available through the distro-specific package manager.
-- For MacOS, [homebrew](https://formulae.brew.sh/).
-- For Windows, [chocolatey](https://community.chocolatey.org/).
-
-## Project layout
-
-The Cargo workspace contains three crates:
-
-- `crates/core` (`rusty_quack_core`): the shared function implementations and registration.
-- `crates/native` (`rusty_quack`): a native `cdylib` with the DuckDB extension entrypoint.
-- `crates/wasm` (`rusty_quack_wasm`): a Wasm `staticlib` with the same entrypoint.
-
-Both entrypoint crates depend on `rusty_quack_core`. Each feature lives in its own module under `crates/core/src/`,
-and `crates/core/src/lib.rs` registers them; see [What the extension registers](#what-the-extension-registers).
-Dependency versions and release settings are shared in the root `Cargo.toml`.
-
-## Building
-After installing the dependencies, building is a two-step process. Firstly run:
-```shell
-make configure
-```
-This will ensure a Python venv is set up with DuckDB and DuckDB's test runner installed. Additionally, depending on configuration,
-DuckDB will be used to determine the correct platform for which you are compiling.
-
-Then, to build the extension run:
-```shell
-make debug
-```
-This delegates the build process to cargo, which will produce a shared library in `target/debug/<shared_lib_name>`. After this step,
-a script is run to transform the shared library into a loadable extension by appending a binary footer. The resulting extension is written
-to the `build/debug` directory.
-
-To create optimized release binaries, simply run `make release` instead.
-
-### WASM
-
-To build for WASM targets, please run `make wasm_eh`. This will create `./build/wasm_eh/release/rusty_quack.duckdb_extension.wasm`, that can then be used inside nodejs or an browser.
-### Running the extension
-To run the extension code, start `duckdb` with `-unsigned` flag. This will allow you to load the local extension file.
+Prerequisites: current stable Rust, Python 3 with venv, Make, Git, and a DuckDB 2.0.0 CLI.
+No DuckDB source build, C++ compilation, or separately installed unit database is needed.
 
 ```sh
-duckdb -unsigned -cmd "LOAD '$PWD/build/debug/extension/rusty_quack/rusty_quack.duckdb_extension';"
+git clone --recurse-submodules git@github.com:sebastiaan-dev/duckdb-units-rs.git
+cd duckdb-units-rs
+make configure
+make release
+make test_release
+./scripts/demo.sh
 ```
 
-The extension must be loaded into the exact DuckDB version it was built for (`TARGET_DUCKDB_VERSION` in the Makefile).
+The launcher uses `DUCKDB_BIN` if set, then `~/.duckdb/cli/2.0.0/duckdb`, then `duckdb`
+on PATH. To select a CLI explicitly:
 
-### What the extension registers
+```sh
+DUCKDB_BIN=/path/to/duckdb ./scripts/demo.sh
+```
 
-The template is a small tour of what a Rust extension can register through DuckDB's C API v2. Every function is
-documented, so `SELECT * FROM duckdb_functions() WHERE categories = ['rusty_quack']` lists them with descriptions and
-examples.
+`make demo` builds the release extension and runs the same demonstration.
+The complete SQL is in [`examples/demo.sql`](examples/demo.sql).
 
-| Module (`crates/core/src/`) | Feature of `duckdb-neo` | Try it |
+For an interactive session:
+
+```sh
+~/.duckdb/cli/2.0.0/duckdb -unsigned \
+  -cmd "LOAD '$PWD/build/release/units.duckdb_extension';"
+```
+
+Use an **absolute extension path** on macOS. The unstable C API requires the exact
+DuckDB target version; a 1.x or different 2.x binary is not a supported substitute.
+`-unsigned` is needed for a locally built extension.
+
+## Examples
+
+```sql
+-- Normalize units stored in a column.
+SELECT site, unit_convert(value, source_unit, 'kW.h') AS kwh
+FROM (VALUES
+    ('Plant A', 3600000.0, 'J'),
+    ('Plant B', 1250.0, 'W.h'),
+    ('Plant C', 2.5, 'kW.h')
+) AS energy_readings(site, value, source_unit);
+-- Plant A: 1.0; Plant B: 1.25; Plant C: 2.5
+
+-- Real compound expressions, not a fixed list of dimension categories.
+SELECT unit_convert(1000, 'kg/m3', 'g/L');          -- 1000
+SELECT unit_compatible('Pa', 'kg/(m.s2)');         -- true
+SELECT unit_compatible('kg', 'kW.h');              -- false
+
+-- Absolute temperatures versus differences: explicit, separate APIs.
+SELECT unit_convert(20, 'Cel', '[degF]');          -- 68
+SELECT unit_convert_delta(20, 'Cel', '[degF]');    -- 36
+SELECT unit_convert(20, 'Cel', 'K');               -- 293.15
+SELECT unit_convert_delta(20, 'Cel', 'K');         -- 20
+
+-- Strict conversions fail loudly.
+SELECT unit_convert(1, 'kg', 'm');                -- ERROR: incompatible_dimension
+
+-- Checked conversions preserve data quality information instead of aborting.
+SELECT unit_convert_checked(1, 'kg', 'm');
+-- {'value': NULL, 'status': 'incompatible_dimension', 'message': ...}
+SELECT unit_convert_checked(NULL, 'J', 'kW.h');
+-- {'value': NULL, 'status': 'missing_input', 'message': ...}
+```
+
+### Syntax matters
+
+| Meaning | Accepted UCUM spelling | Not an alias in this release |
 |---|---|---|
-| `scalar.rs` | scalar function with per-query init state | `SELECT rusty_echo('Jane')` |
-| `quack.rs` | table function with bind data, global and local state | `SELECT * FROM rusty_quack(['Jane', 'Doe'])` |
-| `aggregate.rs` | aggregate function: init, update, combine, finalize; order-independent | `SELECT rusty_longest(name) FROM t` |
-| `sequence.rs` | chunked table function with projection and filter pushdown, cardinality and progress | `SELECT i FROM rusty_sequence(10000) WHERE i < 10` |
-| `quack_type.rs` | custom type and a cast into it, with `CAST` and `TRY_CAST` semantics | `SELECT 3::QUACK, TRY_CAST(11 AS QUACK)` |
+| Kilowatt-hour | `kW.h` | `kWh` |
+| Density | `kg/m3` | `kg/m^3` |
+| Acceleration | `m/s2` | `m/s^2` |
+| Celsius | `Cel` | `C`, `°C`, `celsius` |
+| Fahrenheit | `[degF]` | `F`, `°F` |
+| Micrometre | `um` | `µm` |
+| International inch | `[in_i]` | `inch` |
+| Dimensionless | `1` | empty string |
+
+**`C` means coulomb, not Celsius; `F` means farad, not Fahrenheit.** There is no
+case folding, whitespace trimming, or heuristic alias guessing. `MW` and `mW` differ
+by a factor of one billion. Use parentheses to make denominators explicit.
+
+UCUM annotations are accepted but do not enforce quantity kinds: `mg{total}` and `mg`
+are dimensionally equivalent. Annotations must not be used as a substitute for validation.
+
+## SQL API
+
+All measurement arguments/results are `DOUBLE`; unit arguments are `VARCHAR`.
+
+| Function | Result / contract |
+|---|---|
+| `unit_convert(value, source_unit, target_unit)` | Strict multiplicative/absolute-temperature conversion |
+| `unit_convert_delta(value, source_unit, target_unit)` | Strict temperature-difference conversion; no offsets; temperature dimensions only |
+| `unit_convert_checked(value, source_unit, target_unit)` | `STRUCT(value DOUBLE, status VARCHAR, message VARCHAR)` |
+| `unit_convert_delta_checked(value, source_unit, target_unit)` | Same diagnostic struct, for temperature differences |
+| `unit_compatible(source_unit, target_unit)` | Boolean dimensional compatibility; unknown/unsupported units raise errors |
+| `unit_parse(unit)` | `STRUCT(dimension VARCHAR, base_unit VARCHAR, factor DOUBLE, offset DOUBLE, is_affine BOOLEAN)` |
+| `unit_dimension(unit)` | UCUM dimension vector as text |
+| `unit_valid(unit)` | Whether the unit is supported by **this extension**, not a full UCUM syntax validator |
+| `units_backend()` | Backend, UCUM, and extension-policy versions |
+
+Function descriptions and examples are also in `duckdb_functions()`:
 
 ```sql
-SELECT rusty_echo('Jane');
+SELECT function_name, description
+FROM duckdb_functions() WHERE categories = ['units'];
 ```
 
-```
-┌─────────────────────┐
-│ rusty_echo('Jane')  │
-│       varchar       │
-├─────────────────────┤
-│ 🐤 Jane 🦀 Jane     │
-└─────────────────────┘
-```
+### Parsed representation
 
 ```sql
-SELECT * FROM rusty_quack(['Jane', 'Doe', 'Loves', 'Ducks']);
+SELECT unit_parse('kg/m3');
+-- dimension: L-3.M; base_unit: m-3.g; factor: 1000; offset: 0; is_affine: false
 ```
 
-```
-┌─────────┬─────────┬───────────────────────┬─────────────┐
-│  name   │  icon   │      concat_name      │ total_index │
-│ varchar │ varchar │        varchar        │   uint64    │
-├─────────┼─────────┼───────────────────────┼─────────────┤
-│ Ducks   │ 🐤      │ Ducks|                │           0 │
-│ Loves   │ 🦀      │ Ducks|Loves|          │           1 │
-│ Doe     │ 🐥      │ Ducks|Loves|Doe|      │           2 │
-│ Jane    │ 🐤      │ Ducks|Loves|Doe|Jane| │           3 │
-└─────────┴─────────┴───────────────────────┴─────────────┘
-```
+`base_value = value * factor + offset`. UCUM base units are `m`, `s`, **`g`**, `rad`,
+`K`, `C`, and `cd`; these are not the seven SI base units. Dimension labels are `L`
+(length), `T` (time), `M` (mass), `A` (plane angle), `Θ` (temperature), `Q` (charge),
+and `F` (luminous intensity). `1` is dimensionless.
 
-`EXPLAIN` shows the optimizer hooks at work. The scan lists only the projected columns, and there is
-no `Filter` node: `rusty_sequence` claimed `i < 5` in `pushdown_filter`, so DuckDB dropped its own copy
-and the function enforces the filter while scanning.
+`base_unit` is the dimensional base expression, not a canonical spelling preserving
+scale or offset. Do **not** replace a unit with this string without transforming its value.
+UCUM treats plane angle as a separate dimension, so `Hz` and `rad/s` are not compatible.
 
-```sql
-EXPLAIN SELECT i FROM rusty_sequence(10000) WHERE i < 5;
-```
+### Errors and NULLs
 
-```
-╭─ Rusty Sequence ─────────╮
-│ Function: RUSTY_SEQUENCE │
-│ Projections: i           │
-│ ~10,000 rows             │
-╰──────────────────────────╯
-```
+Strict functions propagate any NULL input to NULL. `unit_valid(NULL)` is also NULL.
+Checked functions always return a struct: missing inputs produce `missing_input`, even
+if another argument is invalid. A successful struct has `status = 'ok'` and NULL message.
+Failed structs have NULL value, a stable status code, and explanatory text.
 
-The `~10,000 rows` is the cardinality that `bind` declared with `set_cardinality`; it is reported before
-any filter is pushed down and cannot be revised afterwards, so it stays at the full count even though the
-query returns 5 rows. A filter the function does not claim keeps its own node:
+Statuses include `missing_input`, `invalid_syntax`, `unknown_unit`,
+`incompatible_dimension`, `unsupported_unit`, `invalid_delta_unit`,
+`non_finite_input`, `overflow`, and `resource_limit`. Match status codes, not message text.
+The `overflow` status also covers numerical underflow to zero.
 
-```sql
-EXPLAIN SELECT i FROM rusty_sequence(10000) WHERE i > 9995;
-```
+## Implementation and boundaries
 
-```
-╭─ Filter ─────────────────╮
-│ Expression: i > 9995     │
-│ ~2,000 rows              │
-╰─────────────┬────────────╯
-╭─ Rusty Sequence ─────────╮
-│ Function: RUSTY_SEQUENCE │
-│ Projections: i           │
-│ ~10,000 rows             │
-╰──────────────────────────╯
-```
+- Parsing/definitions come from a pinned UCUM library, not hand-written conversion macros.
+- Native vector callbacks handle runtime unit columns and NULL/filtered inputs.
+- Each query worker has bounded caches: up to 256 parsed units and 256 conversion pairs,
+  including error results. Caches clear when full; inputs/errors are not retained globally.
+  Repeated units are parsed on first execution, **not yet at bind time**.
+- Ordinary conversions use precomputed scale/offset and fused multiply-add. Extreme ratios
+  and numerical boundary results use the backend's wider decimal arithmetic before narrowing
+  the final value to `DOUBLE`. Decimal factors have up to 28 significant digits; SQL results
+  are still floating-point, not exact rational quantities.
+- Input unit strings are limited to 4096 bytes. The backend limits nesting to 128 and rejects
+  dimensional exponent overflow. Unit factors must be positive, finite and nonzero when
+  represented as `DOUBLE`. Non-finite measurements/results and nonzero results rounded to zero
+  are rejected. This is not arbitrary-precision SQL arithmetic.
+- Multiplicative expressions and affine temperatures are supported. Logarithmic and arbitrary
+  units are deliberately rejected. Affine temperature products/quotients/powers such as `Cel/s`
+  are rejected; use `K/s` for temperature-rate expressions. Delta conversion applies to standalone
+  temperature dimensions, not arbitrary compound expressions.
+- Compatibility checks dimensions, **not semantic quantity kinds**: energy and torque are
+  dimensionally compatible. The extension does not infer what a measurement represents, enforce
+  absolute zero, propagate uncertainty, or validate physical plausibility.
+- No custom numeric type, quantity algebra, alias registry, or unit-discovery table yet.
+- Native macOS arm64 has been exercised locally. The template retains WASM and distribution
+  wiring, but local success is not a claim of validation on every platform.
 
-## Testing
-This extension uses the DuckDB Python client for testing. This should be automatically installed in the `make configure` step.
-The tests themselves are written in the SQLLogicTest format, just like most of DuckDB's tests. A sample test can be found in
-`test/sql/<extension_name>.test`. To run the tests using the *debug* build:
+## Development
 
-```shell
-make test_debug
-```
-
-or for the *release* build:
-```shell
+```sh
+cargo test --workspace --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+make release
 make test_release
 ```
 
-### Version switching
-Testing with different DuckDB versions is really simple:
+The build delegates to Cargo; Make configures the SQL test environment and adds the DuckDB
+extension metadata footer. `make debug && make test_debug` is also supported.
 
-First, run
-```
-make clean_all
-```
-to ensure the previous `make configure` step is deleted.
+Layout:
 
-Then, run
-```
-DUCKDB_TEST_VERSION=v1.3.2 make configure
-```
-to select a different duckdb version to test with
+- `crates/engine/`: DuckDB-independent parsing/conversion policy and numerical tests.
+- `crates/core/`: SQL registration, vector callbacks, checked structs, and bounded caches.
+- `crates/native/`: native `units` entrypoint.
+- `crates/wasm/`: shared-core WASM entrypoint inherited from the template.
+- `test/sql/units.test`: end-to-end SQLLogicTest coverage, including mixed-unit columns,
+  temperature semantics, diagnostics, high-cardinality inputs, and numerical regressions.
 
-Finally, build and test with
-```
-make debug
-make test_debug
-```
-
-### Known issues
-This is a bit of a footgun, but the extensions produced by this template may (or may not) be broken on windows on python3.11
-with the following error on extension load:
-```shell
-IO Error: Extension '<name>.duckdb_extension' could not be loaded: The specified module could not be found
-```
-This was resolved by using python 3.12
+For a DuckDB version upgrade, update the workspace binding dependency, entrypoint API versions,
+Makefile target, distribution workflow and CI-tools submodule together, then clean/reconfigure
+and rerun SQL tests. Cross-version ABI compatibility is not assumed.

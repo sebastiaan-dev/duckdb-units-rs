@@ -1,0 +1,7 @@
+[package]
+name = "units_engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+octofhir-ucum = { version = "=0.9.2", default-features = false }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/native", "crates/wasm"]
+members = ["crates/engine", "crates/core", "crates/native", "crates/wasm"]
 default-members = ["crates/native"]
 resolver = "3"
 
@@ -9,7 +9,8 @@ edition = "2024"
 
 [workspace.dependencies]
 duckdb-neo = { version = "=0.20000.1", features = ["build-extension"] }
-rusty_quack_core = { path = "crates/core" }
+units_core = { path = "crates/core" }
+units_engine = { path = "crates/engine" }
 
 [profile.release]
 lto = true

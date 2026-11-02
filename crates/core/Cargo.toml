@@ -1,7 +1,8 @@
 [package]
-name = "rusty_quack_core"
+name = "units_core"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 duckdb-neo.workspace = true
+units_engine.workspace = true

@@ -1,5 +1,5 @@
 [package]
-name = "rusty_quack"
+name = "units"
 version.workspace = true
 edition.workspace = true
 
@@ -8,4 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 duckdb-neo.workspace = true
-rusty_quack_core.workspace = true
+units_core.workspace = true
