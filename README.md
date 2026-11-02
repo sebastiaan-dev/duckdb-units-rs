@@ -271,3 +271,8 @@ See [the roadmap](docs/ROADMAP.md) for the remaining release gates and planned s
 For a DuckDB version upgrade, update the workspace binding dependency, entrypoint API versions,
 Makefile target, distribution workflow and CI-tools submodule together, then clean/reconfigure
 and rerun SQL tests. Cross-version ABI compatibility is not assumed.
+
+## License
+
+Project code is licensed under the [MIT License](LICENSE).
+Third-party dependencies and UCUM data retain their respective license terms.

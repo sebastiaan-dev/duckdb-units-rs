@@ -2,6 +2,7 @@
 
 ## Unreleased — 0.2.0
 
+- License the project under MIT and declare it in all Rust workspace packages.
 - Add `units_catalog()` and `unit_search(query)` table functions over the pinned UCUM atom
   registry. Unsupported units stay visible with status/reason and NULL conversion definitions.
 - Add `unit_parse_checked(unit)`, returning a nested definition plus status/message without

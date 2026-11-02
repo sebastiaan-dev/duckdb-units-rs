@@ -18,9 +18,9 @@ or broad convenience features.
 
 ## Before publishing a release
 
-- [ ] Establish the project's license and audit template provenance plus dependency/data notices.
-  A public repository is not, by itself, a license grant. Do not assume inherited template code
-  or the UCUM tables can be redistributed without reviewing their terms.
+- [x] Establish the project's license: [MIT](../LICENSE).
+- [ ] Audit template provenance plus third-party dependency/data notices for release artifacts.
+  Dependencies and UCUM data retain their respective license terms.
 - [ ] Independently run/version a UCUM conformance corpus against the exposed SQL policy.
   Distinguish deliberately unsupported cases from parser/conversion defects; preserve expected
   tolerances rather than treating a backend's own conformance statement as validation of the wrapper.
